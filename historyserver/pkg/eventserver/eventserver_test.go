@@ -1085,3 +1085,39 @@ func TestProcessSingleSession(t *testing.T) {
 		assert.True(t, ok, "node2 (uncompressed) should be successfully loaded")
 	})
 }
+
+func TestProcessSingleSessionReadsMultipleSameHourBatches(t *testing.T) {
+	clusterInfo := utils.ClusterInfo{Name: "cluster", Namespace: "ns", SessionName: "session1"}
+	mock := newLogEventMockReader()
+	files := []struct {
+		name   string
+		nodeID string
+	}{
+		{
+			name:   "node1-2024-01-01-00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.gz",
+			nodeID: "YWJjZA==",
+		},
+		{
+			name:   "node1-2024-01-01-00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.gz",
+			nodeID: "ZWZnaA==",
+		},
+	}
+
+	fileNames := make([]string, 0, len(files))
+	for _, file := range files {
+		fileNames = append(fileNames, file.name)
+		var buf bytes.Buffer
+		writer := gzip.NewWriter(&buf)
+		_, err := writer.Write([]byte(`[{"eventType":"NODE_DEFINITION_EVENT","nodeDefinitionEvent":{"nodeId":"` + file.nodeID + `"}}]`))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		mock.addFile("cluster_ns", "session1/node_events/"+file.name, buf.String())
+	}
+	mock.addDir("cluster_ns", "session1/node_events/", fileNames)
+	mock.addDir("cluster_ns", "session1/job_events/", []string{})
+	mock.addDir("cluster_ns", "session1/logs", []string{})
+
+	handler := NewEventHandler(mock)
+	require.NoError(t, handler.ProcessSingleSession(context.Background(), clusterInfo))
+	assert.Len(t, handler.getNodeMap("cluster_ns_session1"), 2)
+}

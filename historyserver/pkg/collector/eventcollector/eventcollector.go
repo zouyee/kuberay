@@ -1,6 +1,8 @@
 package eventcollector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -356,6 +358,11 @@ func getJobID(eventData map[string]interface{}) string {
 	return ""
 }
 
+func eventObjectName(nodeID, hourKey string, data []byte) string {
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%s-%s-%s.gz", nodeID, hourKey, hex.EncodeToString(digest[:]))
+}
+
 // flushNodeEventsForHour flushes node events to storage
 func (ec *EventCollector) flushNodeEventsForHour(hourKey string, events []Event) error {
 	// Create event data
@@ -384,7 +391,7 @@ func (ec *EventCollector) flushNodeEventsForHour(hourKey string, events []Event)
 	// Build node event storage path using event's nodeID
 	sessionPath := path.Clean(path.Join(ec.root, utils.AppendRayClusterNameNamespace(ec.clusterName, ec.clusterNamespace), sessionNameToUse))
 
-	basePath := path.Join(sessionPath, "node_events", fmt.Sprintf("%s-%s.gz", nodeIDToUse, hourKey))
+	basePath := path.Join(sessionPath, "node_events", eventObjectName(nodeIDToUse, hourKey, data))
 
 	// Ensure storage directory exists
 	dir := path.Dir(basePath)
@@ -430,7 +437,7 @@ func (ec *EventCollector) flushJobEventsForHour(jobID, hourKey string, events []
 	// Build job event storage path using event's nodeID
 	sessionPath := path.Clean(path.Join(ec.root, utils.AppendRayClusterNameNamespace(ec.clusterName, ec.clusterNamespace), sessionNameToUse))
 
-	basePath := path.Join(sessionPath, "job_events", jobID, fmt.Sprintf("%s-%s.gz", nodeIDToUse, hourKey))
+	basePath := path.Join(sessionPath, "job_events", jobID, eventObjectName(nodeIDToUse, hourKey, data))
 
 	// Ensure storage directory exists
 	dir := path.Dir(basePath)

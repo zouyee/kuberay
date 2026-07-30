@@ -29,7 +29,7 @@ type EventHandler struct {
 	ClusterLogEventMap *types.ClusterLogEventMap // For /events API (Log Events from logs/events/)
 }
 
-var eventFilePattern = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}-\d{2}(\.gz)?$`)
+var eventFilePattern = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}-\d{2}(-[a-f0-9]{64})?(\.gz)?$`)
 
 // taskPrefix is extracted to avoid hard-coded "task::" usage
 const taskPrefix = "task::"
@@ -39,7 +39,7 @@ func isValidEventFile(fileName string) bool {
 	if strings.HasSuffix(fileName, "/") {
 		return false
 	}
-	// Only files matching {nodeId}-{YYYY-MM-DD-HH} format are valid event files
+	// Accept legacy hourly files and content-addressed hourly batch files.
 	return eventFilePattern.MatchString(fileName)
 }
 
