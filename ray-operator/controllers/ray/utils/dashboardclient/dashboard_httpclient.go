@@ -198,7 +198,8 @@ func (r *RayDashboardClient) ListJobs(ctx context.Context) (*[]utiltypes.RayJobI
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil
+		jobInfo := make([]utiltypes.RayJobInfo, 0)
+		return &jobInfo, nil
 	}
 
 	body, err := io.ReadAll(resp.Body)

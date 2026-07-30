@@ -131,6 +131,32 @@ var _ = Describe("RayFrameworkGenerator", func() {
 		Expect(err.Error()).To(ContainSubstring("Ray misbehaved"))
 	})
 
+	It("returns an empty job list when the dashboard endpoint is not found", func() {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder(http.MethodGet, rayDashboardClient.dashboardURL+JobPath,
+			httpmock.NewStringResponder(http.StatusNotFound, "not found"))
+
+		jobs, err := rayDashboardClient.ListJobs(context.TODO())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(jobs).ToNot(BeNil())
+		Expect(*jobs).To(BeEmpty())
+	})
+
+	It("returns an empty job list for an empty dashboard result", func() {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder(http.MethodGet, rayDashboardClient.dashboardURL+JobPath,
+			httpmock.NewStringResponder(http.StatusOK, "[]"))
+
+		jobs, err := rayDashboardClient.ListJobs(context.TODO())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(jobs).ToNot(BeNil())
+		Expect(*jobs).To(BeEmpty())
+	})
+
 	It("Test stop job", func() {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()

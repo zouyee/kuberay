@@ -159,6 +159,9 @@ func (s *RayJobSubmissionServiceServer) ListJobDetails(ctx context.Context, req 
 		return nil, err
 	}
 	submissions := make([]*api.JobSubmissionInfo, 0)
+	if nodesInfo == nil {
+		return &api.ListJobSubmissionInfo{Submissions: submissions}, nil
+	}
 	for _, nodeInfo := range *nodesInfo {
 		submissions = append(submissions, convertNodeInfo(&nodeInfo))
 	}
