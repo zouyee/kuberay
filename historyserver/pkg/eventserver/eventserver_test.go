@@ -956,7 +956,7 @@ func TestNormalizeActorIDsToHex(t *testing.T) {
 func TestProcessSingleSession(t *testing.T) {
 	clusterInfo := utils.ClusterInfo{Name: "cluster", Namespace: "ns", SessionName: "session1"}
 
-	t.Run("returns error when every listed file fails I/O", func(t *testing.T) {
+	t.Run("returns error when a listed file fails transient I/O", func(t *testing.T) {
 		mock := newLogEventMockReader()
 		mock.addDir("cluster_ns", "session1/job_events/", []string{"job-01000000/"})
 		mock.addDir("cluster_ns", "session1/job_events/job-01000000/",
@@ -968,7 +968,7 @@ func TestProcessSingleSession(t *testing.T) {
 		h := NewEventHandler(mock)
 		err := h.ProcessSingleSession(context.Background(), clusterInfo)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "read 0 of 2")
+		assert.Contains(t, err.Error(), "event file")
 	})
 
 	t.Run("empty file list returns nil (legit empty session)", func(t *testing.T) {
@@ -982,7 +982,7 @@ func TestProcessSingleSession(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("partial success does not return error", func(t *testing.T) {
+	t.Run("partial transient failure returns error", func(t *testing.T) {
 		mock := newLogEventMockReader()
 		mock.addDir("cluster_ns", "session1/node_events/",
 			[]string{"node1-2024-01-01-00.gz", "node2-2024-01-01-00.gz"})
@@ -999,7 +999,8 @@ func TestProcessSingleSession(t *testing.T) {
 
 		h := NewEventHandler(mock)
 		err = h.ProcessSingleSession(context.Background(), clusterInfo)
-		require.NoError(t, err)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "node2-2024-01-01-00.gz")
 	})
 
 	t.Run("all corrupt JSON does not return error", func(t *testing.T) {
@@ -1023,7 +1024,7 @@ func TestProcessSingleSession(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("log events failure alone does not surface as error", func(t *testing.T) {
+	t.Run("log event transient failure surfaces as error", func(t *testing.T) {
 		mock := newLogEventMockReader()
 		mock.addDir("cluster_ns", "session1/job_events/", []string{})
 		mock.addDir("cluster_ns", "session1/node_events/", []string{})
@@ -1032,10 +1033,11 @@ func TestProcessSingleSession(t *testing.T) {
 
 		h := NewEventHandler(mock)
 		err := h.ProcessSingleSession(context.Background(), clusterInfo)
-		require.NoError(t, err)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "read log events")
 	})
 
-	t.Run("ray events failure surfaces; log events failure stays silent", func(t *testing.T) {
+	t.Run("log event failure is reported before ray event processing", func(t *testing.T) {
 		mock := newLogEventMockReader()
 		mock.addDir("cluster_ns", "session1/node_events/", []string{"node1-2024-01-01-00.gz"})
 		mock.addDir("cluster_ns", "session1/job_events/", []string{})
@@ -1045,8 +1047,7 @@ func TestProcessSingleSession(t *testing.T) {
 		h := NewEventHandler(mock)
 		err := h.ProcessSingleSession(context.Background(), clusterInfo)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "read 0 of 1 event files")
-		assert.NotContains(t, err.Error(), "log event")
+		assert.Contains(t, err.Error(), "read log events")
 	})
 
 	t.Run("transparent decompression of compressed .gz files and reading uncompressed legacy files", func(t *testing.T) {

@@ -3,7 +3,9 @@ package historyserver
 import (
 	"context"
 	"errors"
+	"io"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -375,5 +377,92 @@ func TestGetSnapshot_SlidingTTLRenewal(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if _, ok := sl.GetSnapshot(key); ok {
 		t.Fatal("expected snapshot to expire after idle period")
+	}
+}
+
+type recoveringStorageReader struct {
+	mu    sync.RWMutex
+	dirs  map[string][]string
+	files map[string]string
+}
+
+func (r *recoveringStorageReader) List() []utils.ClusterInfo { return nil }
+
+func (r *recoveringStorageReader) ListFiles(_ string, dir string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.dirs[dir]...)
+}
+
+func (r *recoveringStorageReader) GetContent(_ string, fileName string) io.Reader {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	content, ok := r.files[fileName]
+	if !ok {
+		return nil
+	}
+	return strings.NewReader(content)
+}
+
+func (r *recoveringStorageReader) setFile(fileName, content string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.files[fileName] = content
+}
+
+func (r *recoveringStorageReader) deleteFiles() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.files = map[string]string{}
+}
+
+func TestLoadSession_PartialTransientFailureRecoveryReloadsCompleteSnapshot(t *testing.T) {
+	info := testEnterClusterInfo()
+	key := utils.BuildClusterSessionKey(info.Name, info.Namespace, info.SessionName)
+	firstFile := info.SessionName + "/node_events/node1-2024-01-01-00"
+	secondFile := info.SessionName + "/node_events/node2-2024-01-01-00"
+	reader := &recoveringStorageReader{
+		dirs: map[string][]string{
+			info.SessionName + "/logs":        {},
+			info.SessionName + "/job_events/": {},
+			info.SessionName + "/node_events/": {
+				"node1-2024-01-01-00",
+				"node2-2024-01-01-00",
+			},
+		},
+		files: map[string]string{
+			firstFile: `[{"eventType":"NODE_DEFINITION_EVENT","nodeDefinitionEvent":{"nodeId":"YWJjZA=="}}]`,
+		},
+	}
+	processor := NewSessionProcessor(reader, newFakeK8sClient(t, nil))
+	loader := newTestSessionLoader(t, processor, 0)
+
+	if _, err := loader.LoadSession(context.Background(), info); err == nil {
+		t.Fatal("expected partial transient read failure")
+	}
+	if _, ok := loader.GetSnapshot(key); ok {
+		t.Fatal("partial snapshot must not enter the non-expiring cache")
+	}
+
+	reader.setFile(secondFile, `[{"eventType":"NODE_DEFINITION_EVENT","nodeDefinitionEvent":{"nodeId":"ZWZnaA=="}}]`)
+	if _, err := loader.LoadSession(context.Background(), info); err != nil {
+		t.Fatalf("client-driven reload after storage recovery failed: %v", err)
+	}
+
+	snapshot, ok := loader.GetSnapshot(key)
+	if !ok {
+		t.Fatal("complete recovered snapshot was not cached")
+	}
+	if len(snapshot.Nodes) != 2 {
+		t.Fatalf("recovered snapshot has %d nodes, want 2", len(snapshot.Nodes))
+	}
+
+	reader.deleteFiles()
+	if _, err := loader.LoadSession(context.Background(), info); err != nil {
+		t.Fatalf("cached complete snapshot should not reload storage: %v", err)
+	}
+	cached, ok := loader.GetSnapshot(key)
+	if !ok || len(cached.Nodes) != 2 {
+		t.Fatalf("cached snapshot after reload = %#v, want complete two-node snapshot", cached)
 	}
 }

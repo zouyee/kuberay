@@ -1021,12 +1021,11 @@ func (h *EventHandler) ProcessSingleSession(ctx context.Context, clusterInfo uti
 	clusterNameNamespace := clusterInfo.Name + "_" + clusterInfo.Namespace
 	clusterSessionKey := utils.BuildClusterSessionKey(clusterInfo.Name, clusterInfo.Namespace, clusterInfo.SessionName)
 
-	// ClusterLogEventMap backs only the /events endpoint, so log event read failures must not
-	// block marking the session as loaded and force subsequent Ray event re-processing.
+	// A dead-session snapshot is cached without expiry. Any transient log-file read failure
+	// must therefore fail the whole attempt; otherwise /events would permanently serve partial data.
 	logEventReader := NewLogEventReader(h.reader)
 	if err := logEventReader.ReadLogEvents(clusterInfo, clusterSessionKey, h.ClusterLogEventMap); err != nil {
-		logrus.Errorf("Incomplete Log Events read for %s: %v. /events endpoint may serve partial data.",
-			clusterSessionKey, err)
+		return fmt.Errorf("read log events for %s: %w", clusterSessionKey, err)
 	}
 
 	eventFileList := append(h.getAllJobEventFiles(clusterInfo), h.getAllNodeEventFiles(clusterInfo)...)
@@ -1044,8 +1043,7 @@ func (h *EventHandler) ProcessSingleSession(ctx context.Context, clusterInfo uti
 		if strings.HasSuffix(eventFile, ".gz") {
 			rc, err := compression.ReadCompressedContent(h.reader, clusterNameNamespace, eventFile)
 			if err != nil {
-				logrus.Errorf("Failed to decompress event file %s: %v", eventFile, err)
-				continue
+				return fmt.Errorf("decompress event file %s: %w", eventFile, err)
 			}
 			eventioReader = rc
 		} else {
@@ -1053,8 +1051,7 @@ func (h *EventHandler) ProcessSingleSession(ctx context.Context, clusterInfo uti
 		}
 
 		if eventioReader == nil {
-			logrus.Errorf("Failed to get content for event file: %s, skipping", eventFile)
-			continue
+			return fmt.Errorf("get content for event file %s: transient storage read failure", eventFile)
 		}
 
 		eventbytes, err := io.ReadAll(eventioReader)
@@ -1063,8 +1060,7 @@ func (h *EventHandler) ProcessSingleSession(ctx context.Context, clusterInfo uti
 		}
 
 		if err != nil {
-			logrus.Errorf("Failed to read events for file %s: %v", eventFile, err)
-			continue
+			return fmt.Errorf("read event file %s: %w", eventFile, err)
 		}
 		rayEventsRead++
 
