@@ -160,43 +160,47 @@ func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance
 		return ctrl.Result{}, nil
 	}
 
+	deletingWithGCSFTFinalizer := !instance.DeletionTimestamp.IsZero() && hasGCSFTFinalizer(instance)
+
 	setDefaults(instance)
 
-	if err := utils.ValidateRayClusterMetadata(instance.ObjectMeta); err != nil {
-		logger.Error(err, "The RayCluster metadata is invalid")
-		r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterMetadata), string(utils.ValidateAction),
-			"The RayCluster metadata is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
-		return ctrl.Result{}, nil
-	}
+	if !deletingWithGCSFTFinalizer {
+		if err := utils.ValidateRayClusterMetadata(instance.ObjectMeta); err != nil {
+			logger.Error(err, "The RayCluster metadata is invalid")
+			r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterMetadata), string(utils.ValidateAction),
+				"The RayCluster metadata is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
+			return ctrl.Result{}, nil
+		}
 
-	if err := utils.ValidateRayClusterSpec(&instance.Spec, instance.Annotations); err != nil {
-		logger.Error(err, "The RayCluster spec is invalid")
-		r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterSpec), string(utils.ValidateAction),
-			"The RayCluster spec is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
-		return ctrl.Result{}, nil
-	}
+		if err := utils.ValidateRayClusterSpec(&instance.Spec, instance.Annotations); err != nil {
+			logger.Error(err, "The RayCluster spec is invalid")
+			r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterSpec), string(utils.ValidateAction),
+				"The RayCluster spec is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
+			return ctrl.Result{}, nil
+		}
 
-	// Fail fast when mTLS is requested but cert-manager is not installed.
-	if utils.IsTLSEnabled(&instance.Spec) && !r.options.CertManagerAvailable {
-		err := fmt.Errorf("tlsOptions requires cert-manager, but cert-manager is not installed")
-		logger.Error(err, "cert-manager not available for mTLS")
-		r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterSpec), string(utils.ValidateAction),
-			"The RayCluster spec is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
-		return ctrl.Result{}, nil
-	}
+		// Fail fast when mTLS is requested but cert-manager is not installed.
+		if utils.IsTLSEnabled(&instance.Spec) && !r.options.CertManagerAvailable {
+			err := fmt.Errorf("tlsOptions requires cert-manager, but cert-manager is not installed")
+			logger.Error(err, "cert-manager not available for mTLS")
+			r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterSpec), string(utils.ValidateAction),
+				"The RayCluster spec is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
+			return ctrl.Result{}, nil
+		}
 
-	if err := utils.ValidateRayClusterUpgradeOptions(instance); err != nil {
-		logger.Error(err, "The RayCluster UpgradeStrategy is invalid")
-		r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterSpec), string(utils.ValidateAction),
-			"The RayCluster UpgradeStrategy is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
-		return ctrl.Result{}, nil
-	}
+		if err := utils.ValidateRayClusterUpgradeOptions(instance); err != nil {
+			logger.Error(err, "The RayCluster UpgradeStrategy is invalid")
+			r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterSpec), string(utils.ValidateAction),
+				"The RayCluster UpgradeStrategy is invalid %s/%s: %v", instance.Namespace, instance.Name, err)
+			return ctrl.Result{}, nil
+		}
 
-	if err := utils.ValidateRayClusterStatus(instance); err != nil {
-		logger.Error(err, "The RayCluster status is invalid")
-		r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterStatus), string(utils.ValidateAction),
-			"The RayCluster status is invalid %s/%s, %v", instance.Namespace, instance.Name, err)
-		return ctrl.Result{RequeueAfter: DefaultRequeueDuration}, err
+		if err := utils.ValidateRayClusterStatus(instance); err != nil {
+			logger.Error(err, "The RayCluster status is invalid")
+			r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, string(utils.InvalidRayClusterStatus), string(utils.ValidateAction),
+				"The RayCluster status is invalid %s/%s, %v", instance.Namespace, instance.Name, err)
+			return ctrl.Result{RequeueAfter: DefaultRequeueDuration}, err
+		}
 	}
 
 	// Please do NOT modify `originalRayClusterInstance` in the following code.
@@ -207,6 +211,10 @@ func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance
 	// variable `ENABLE_GCS_FT_REDIS_CLEANUP` to `false`, and undertake the Redis storage namespace cleanup
 	// manually after the RayCluster CR deletion.
 	enableGCSFTRedisCleanup := strings.ToLower(os.Getenv(utils.ENABLE_GCS_FT_REDIS_CLEANUP)) != "false"
+
+	if deletingWithGCSFTFinalizer && time.Since(instance.DeletionTimestamp.Time) >= getGCSFTDeletionTimeout(instance) {
+		return r.forceRemoveGCSFTFinalizer(ctx, instance)
+	}
 
 	// A RayCluster that was created with the Redis backend (and therefore received
 	// the Redis cleanup finalizer) and later switched to the embedded RocksDB
@@ -228,8 +236,9 @@ func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance
 		return ctrl.Result{}, nil
 	}
 
-	if enableGCSFTRedisCleanup && utils.IsGCSFaultToleranceEnabled(&instance.Spec, instance.Annotations) &&
-		!utils.IsGCSFaultToleranceEmbedded(instance.Spec.GcsFaultToleranceOptions) {
+	if deletingWithGCSFTFinalizer ||
+		(enableGCSFTRedisCleanup && utils.IsGCSFaultToleranceEnabled(&instance.Spec, instance.Annotations) &&
+			!utils.IsGCSFaultToleranceEmbedded(instance.Spec.GcsFaultToleranceOptions)) {
 		if instance.DeletionTimestamp.IsZero() {
 			if !controllerutil.ContainsFinalizer(instance, utils.GCSFaultToleranceRedisCleanupFinalizer) {
 				logger.Info(
@@ -273,16 +282,6 @@ func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance
 			redisCleanupJobs := batchv1.JobList{}
 			if err := r.List(ctx, &redisCleanupJobs, filterLabels...); err != nil {
 				return ctrl.Result{RequeueAfter: DefaultRequeueDuration}, err
-			}
-
-			// Check finalizer timeout for RayService FT clusters and set requeue flag
-			if hasGCSFTFinalizer(instance) {
-				deletionAge := time.Since(instance.DeletionTimestamp.Time)
-				// This is to handle edge cases where the finalizer doesn't get removed,
-				// thus preventing release of resource quotas.
-				if deletionAge >= getGCSFTDeletionTimeout(instance) {
-					return r.forceRemoveGCSFTFinalizer(ctx, instance)
-				}
 			}
 
 			if len(redisCleanupJobs.Items) != 0 {

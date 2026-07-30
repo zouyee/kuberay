@@ -2801,6 +2801,86 @@ func TestEvents_RedisCleanup(t *testing.T) {
 	}
 }
 
+func TestDeletingGCSFTClusterWithInvalidSpecRunsRedisCleanup(t *testing.T) {
+	setupTest(t)
+
+	newScheme := runtime.NewScheme()
+	require.NoError(t, rayv1.AddToScheme(newScheme))
+	require.NoError(t, corev1.AddToScheme(newScheme))
+	require.NoError(t, batchv1.AddToScheme(newScheme))
+
+	cluster := testRayCluster.DeepCopy()
+	cluster.Spec.EnableInTreeAutoscaling = nil
+	cluster.Annotations = map[string]string{utils.RayFTEnabledAnnotationKey: "true"}
+	cluster.Spec.HeadGroupSpec.RayStartParams = map[string]string{"num-cpus": "1"}
+	cluster.Spec.HeadGroupSpec.Resources = map[string]string{"CPU": "1"}
+	require.Error(t, utils.ValidateRayClusterSpec(&cluster.Spec, cluster.Annotations))
+	controllerutil.AddFinalizer(cluster, utils.GCSFaultToleranceRedisCleanupFinalizer)
+	now := metav1.Now()
+	cluster.DeletionTimestamp = &now
+
+	fakeClient := clientFake.NewClientBuilder().
+		WithScheme(newScheme).
+		WithObjects(cluster).
+		WithStatusSubresource(cluster).
+		Build()
+	reconciler := &RayClusterReconciler{
+		Client:   fakeClient,
+		Recorder: &events.FakeRecorder{},
+		Scheme:   newScheme,
+	}
+
+	_, err := reconciler.rayClusterReconcile(context.Background(), cluster)
+	require.NoError(t, err)
+
+	jobs := batchv1.JobList{}
+	require.NoError(t, fakeClient.List(context.Background(), &jobs, client.InNamespace(cluster.Namespace)))
+	require.Len(t, jobs.Items, 1, "invalid current spec must not block Redis cleanup")
+}
+
+func TestDeletingGCSFTClusterWithInvalidStatusRemovesFinalizerAfterTimeout(t *testing.T) {
+	setupTest(t)
+
+	newScheme := runtime.NewScheme()
+	require.NoError(t, rayv1.AddToScheme(newScheme))
+
+	cluster := testRayCluster.DeepCopy()
+	cluster.Annotations = map[string]string{
+		utils.RayFTEnabledAnnotationKey:                "true",
+		utils.RayClusterGCSFTDeletionTimeoutAnnotation: "1",
+	}
+	cluster.Status.Conditions = []metav1.Condition{
+		{Type: string(rayv1.RayClusterSuspending), Status: metav1.ConditionTrue},
+		{Type: string(rayv1.RayClusterSuspended), Status: metav1.ConditionTrue},
+	}
+	require.Error(t, utils.ValidateRayClusterStatus(cluster))
+	controllerutil.AddFinalizer(cluster, utils.GCSFaultToleranceRedisCleanupFinalizer)
+	past := metav1.NewTime(time.Now().Add(-time.Minute))
+	cluster.DeletionTimestamp = &past
+
+	fakeClient := clientFake.NewClientBuilder().
+		WithScheme(newScheme).
+		WithObjects(cluster).
+		WithStatusSubresource(cluster).
+		Build()
+	reconciler := &RayClusterReconciler{
+		Client:   fakeClient,
+		Recorder: &events.FakeRecorder{},
+		Scheme:   newScheme,
+	}
+
+	_, err := reconciler.rayClusterReconcile(context.Background(), cluster)
+	require.NoError(t, err)
+
+	clusters := rayv1.RayClusterList{}
+	require.NoError(t, fakeClient.List(context.Background(), &clusters, client.InNamespace(cluster.Namespace)))
+	if len(clusters.Items) == 1 {
+		assert.False(t, hasGCSFTFinalizer(&clusters.Items[0]), "timeout must remove the finalizer despite invalid status")
+	} else {
+		assert.Empty(t, clusters.Items, "cluster should be deleted after timeout removes its finalizer")
+	}
+}
+
 func Test_RedisCleanup(t *testing.T) {
 	setupTest(t)
 	newScheme := runtime.NewScheme()
