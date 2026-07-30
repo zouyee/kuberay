@@ -964,6 +964,8 @@ func TestBatchSchedulerOnCompletionCalledWhenRayJobComplete(t *testing.T) {
 		cleanupErr          error
 		expectCleanupCalled bool
 		expectCleanupEvent  string
+		expectReconcileErr  bool
+		expectRequeueAfter  time.Duration
 	}{
 		{
 			name:                "Complete status - cleanup performed successfully",
@@ -982,12 +984,14 @@ func TestBatchSchedulerOnCompletionCalledWhenRayJobComplete(t *testing.T) {
 			expectCleanupEvent:  "",
 		},
 		{
-			name:                "Complete status - cleanup returns error",
+			name:                "Complete status - cleanup failure returns error and requeues",
 			jobDeploymentStatus: rayv1.JobDeploymentStatusComplete,
 			cleanupDidUpdate:    false,
 			cleanupErr:          errors.New("cleanup failed"),
 			expectCleanupCalled: true,
 			expectCleanupEvent:  string(utils.FailedToCleanupBatchScheduler),
+			expectReconcileErr:  true,
+			expectRequeueAfter:  RayJobDefaultRequeueDuration,
 		},
 		{
 			name:                "Failed status - cleanup performed successfully",
@@ -1057,14 +1061,19 @@ func TestBatchSchedulerOnCompletionCalledWhenRayJobComplete(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      rayJob.Name,
 					Namespace: rayJob.Namespace,
 				},
 			})
-			// The Reconcile should not return an error for terminal states
-			require.NoError(t, err)
+			if tc.expectReconcileErr {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, "failed to cleanup batch scheduler resources")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.expectRequeueAfter, result.RequeueAfter)
 
 			// Verify CleanupOnCompletion was called
 			assert.True(t, fakeScheduler.cleanupCalled, "CleanupOnCompletion should have been called when RayJob is in %s status", tc.jobDeploymentStatus)
@@ -1085,6 +1094,63 @@ func TestBatchSchedulerOnCompletionCalledWhenRayJobComplete(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTerminalBatchSchedulerCleanupFailurePreventsClusterDeletion(t *testing.T) {
+	newScheme := runtime.NewScheme()
+	require.NoError(t, rayv1.AddToScheme(newScheme))
+
+	rayJob := &rayv1.RayJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-rayjob", Namespace: "default"},
+		Spec: rayv1.RayJobSpec{
+			Entrypoint:               "echo hello",
+			ShutdownAfterJobFinishes: true,
+			TTLSecondsAfterFinished:  0,
+			RayClusterSpec: &rayv1.RayClusterSpec{
+				HeadGroupSpec: rayv1.HeadGroupSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "ray-head", Image: "rayproject/ray:latest"}},
+						},
+					},
+				},
+			},
+		},
+		Status: rayv1.RayJobStatus{
+			JobDeploymentStatus: rayv1.JobDeploymentStatusComplete,
+			JobStatus:           rayv1.JobStatusSucceeded,
+			RayClusterName:      "test-raycluster",
+			EndTime:             &metav1.Time{Time: time.Now().Add(-time.Minute)},
+		},
+	}
+	rayCluster := &rayv1.RayCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: rayJob.Status.RayClusterName, Namespace: rayJob.Namespace},
+	}
+	fakeClient := clientFake.NewClientBuilder().
+		WithScheme(newScheme).
+		WithRuntimeObjects(rayJob, rayCluster).
+		WithStatusSubresource(rayJob).
+		Build()
+	fakeScheduler := &fakeBatchScheduler{cleanupErr: errors.New("cleanup failed")}
+	reconciler := &RayJobReconciler{
+		Client:   fakeClient,
+		Recorder: events.NewFakeRecorder(10),
+		Scheme:   newScheme,
+		options: RayJobReconcilerOptions{
+			BatchSchedulerManager: batchscheduler.NewSchedulerManagerForTest(fakeScheduler),
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: rayJob.Name, Namespace: rayJob.Namespace},
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, RayJobDefaultRequeueDuration, result.RequeueAfter)
+	assert.True(t, fakeScheduler.cleanupCalled)
+	remainingCluster := &rayv1.RayCluster{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(rayCluster), remainingCluster),
+		"the destructive deletion policy must not run until scheduler cleanup succeeds")
 }
 
 func TestGetJobStatusCheckTimeoutSeconds(t *testing.T) {

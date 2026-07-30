@@ -418,11 +418,9 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 		// The RayJob is already suspended, we should not requeue it.
 		return ctrl.Result{}, nil
 	case rayv1.JobDeploymentStatusComplete, rayv1.JobDeploymentStatusFailed:
-		defer func() {
-			if err := r.cleanupBatchSchedulerResources(ctx, rayJobInstance); err != nil {
-				logger.Error(err, "Failed to cleanup batch scheduler resources")
-			}
-		}()
+		if err := r.cleanupBatchSchedulerResources(ctx, rayJobInstance); err != nil {
+			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
+		}
 
 		// The RayJob has reached a terminal state. Handle the cleanup and deletion logic.
 		// If the RayJob uses an existing RayCluster, we must not delete it.
