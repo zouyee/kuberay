@@ -168,31 +168,25 @@ func (ec *EventCollector) PersistEvents(req *restful.Request, resp *restful.Resp
 			SessionName: sessionNameStr,
 			NodeID:      ec.currentNodeID, // Store currentNodeID when event arrived (under lock)
 		}
-		ec.events = append(ec.events, event)
 
-		// Check if sessionName changed
+		var eventsToFlush []Event
 		if ec.currentSessionName != sessionNameStr {
 			logrus.Infof("Session name changed from %s to %s, flushing events", ec.currentSessionName, sessionNameStr)
-			// Save current events before flushing
-			eventsToFlush := make([]Event, len(ec.events))
-			copy(eventsToFlush, ec.events)
-
-			// Clear event list
-			ec.events = ec.events[:0]
-
-			// Update current sessionName
+			if len(ec.events) > 0 {
+				eventsToFlush = make([]Event, len(ec.events))
+				copy(eventsToFlush, ec.events)
+				ec.events = ec.events[:0]
+			}
 			ec.currentSessionName = sessionNameStr
-
-			// Unlock before flushing
-			ec.mutex.Unlock()
-
-			// Flush previous events
-			ec.flushEventsInternal(eventsToFlush)
-			return
 		}
+		ec.events = append(ec.events, event)
 		ec.mutex.Unlock()
 
-		logrus.Infof("Received event with ID: %v at %v, session: %s, node: %s", eventData["eventId"], timestamp, sessionNameStr, ec.currentNodeID)
+		if len(eventsToFlush) > 0 {
+			ec.flushEventsInternal(eventsToFlush)
+		}
+
+		logrus.Infof("Received event with ID: %v at %v, session: %s, node: %s", eventData["eventId"], timestamp, sessionNameStr, event.NodeID)
 	}
 
 	resp.WriteHeader(http.StatusOK)
